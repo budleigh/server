@@ -67,6 +67,83 @@ my_b_copy_to_file(IO_CACHE *cache, FILE *file)
   DBUG_RETURN(0);
 }
 
+/**
+  The same as above but copying is made in steps of the number of
+  fragments, and each step is wrapped with writing to the file @c
+  before_frag and @c after_frag formated strings.
+*/
+int
+my_b_copy_to_file_frag(IO_CACHE *cache, FILE *file,
+                       uint n_frag,
+                       const char* before_frag,
+                       const char* after_frag,
+                       const char* delim)
+{
+  size_t bytes_in_cache;
+
+  size_t total_size= my_b_tell(cache);
+  size_t frag_size= total_size / n_frag;
+  size_t last_block_written= 0;
+  size_t total_written= 0;
+  size_t frag_written= 0;
+
+  char *buf;
+
+  DBUG_ENTER("my_b_copy_to_file_frag");
+
+  DBUG_ASSERT(cache->type == WRITE_CACHE);
+
+  /* Memory allocation below reserves 2 decimal digits */
+  if (n_frag > 100)
+       DBUG_RETURN(1);
+
+  /* Reinit the cache to read from the beginning of the cache */
+  if (reinit_io_cache(cache, READ_CACHE, 0L, FALSE, FALSE))
+    DBUG_RETURN(1);
+
+  bytes_in_cache= my_b_bytes_in_cache(cache);
+  /* Allocation is a bit excessive though safe */
+  buf= my_alloca(strlen(before_frag) +  strlen(after_frag) + 16);
+  for (uint i= 0; i < n_frag; i++, total_written += frag_written)
+  {
+       sprintf(buf, before_frag, i);
+       my_fwrite(file, (uchar*) buf, strlen(buf), MYF(MY_WME | MY_NABP));
+
+       do
+       {
+            size_t block_to_write=  (bytes_in_cache + frag_written > frag_size) ?
+                 frag_size - frag_written : bytes_in_cache;
+            if (my_fwrite(file, cache->read_pos + last_block_written,
+                          block_to_write,
+                          MYF(MY_WME | MY_NABP)) == (size_t) -1)
+                 DBUG_RETURN(1);
+            frag_written += block_to_write;
+            if (block_to_write < bytes_in_cache)
+            {
+                 last_block_written= block_to_write;
+
+                 DBUG_ASSERT(frag_written <= frag_size);
+
+                 break;
+            }
+            else
+            {
+                 last_block_written= 0;
+            }
+       } while ((bytes_in_cache= my_b_fill(cache)));
+
+       sprintf(buf, after_frag, delim);
+       my_fwrite(file, (uchar*) buf, strlen(buf), MYF(MY_WME | MY_NABP));
+  }
+
+  DBUG_ASSERT(total_written == total_size);
+
+  my_afree(buf);
+  if(cache->error == -1)
+    DBUG_RETURN(1);
+  DBUG_RETURN(0);
+}
+
 
 my_off_t my_b_append_tell(IO_CACHE* info)
 {

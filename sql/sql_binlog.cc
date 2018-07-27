@@ -53,14 +53,6 @@ void mysql_client_binlog_statement(THD* thd)
   if (check_global_access(thd, SUPER_ACL))
     DBUG_VOID_RETURN;
 
-  size_t coded_len= thd->lex->comment.length;
-  if (!coded_len)
-  {
-    my_error(ER_SYNTAX_ERROR, MYF(0));
-    DBUG_VOID_RETURN;
-  }
-  size_t decoded_len= base64_needed_decoded_length(coded_len);
-
   /*
     option_bits will be changed when applying the event. But we don't expect
     it be changed permanently after BINLOG statement, so backup it first.
@@ -81,6 +73,8 @@ void mysql_client_binlog_statement(THD* thd)
   int err;
   Relay_log_info *rli;
   rpl_group_info *rgi;
+  char *buf;
+  size_t coded_len= 0, decoded_len= 0;
 
   rli= thd->rli_fake;
   if (!rli)
@@ -102,15 +96,12 @@ void mysql_client_binlog_statement(THD* thd)
   rgi->thd= thd;
 
   const char *error= 0;
-  char *buf= (char *) my_malloc(decoded_len, MYF(MY_WME));
   Log_event *ev = 0;
 
   /*
     Out of memory check
   */
-  if (!(rli &&
-        rli->relay_log.description_event_for_exec &&
-        buf))
+  if (!(rli && rli->relay_log.description_event_for_exec))
   {
     my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), 1);  /* needed 1 bytes */
     goto end;
@@ -118,6 +109,58 @@ void mysql_client_binlog_statement(THD* thd)
 
   rli->sql_driver_thd= thd;
   rli->no_storage= TRUE;
+
+  if (thd->lex->fragmented_binlog_event > 0)
+  {
+    /*
+      Decode fragments into the standard placeholder. The resulted
+      size can exceed max(max_allowed_packet) which is not a problem
+      while String class methods are not used.
+    */
+
+    /* Index is in range of 0..99 to occupy 2 bytes at most */
+    char *name_fmt= (char *) my_malloc(thd->lex->ident.length + 3, MYF(MY_WME));
+    char *name_buf= (char *) my_malloc(thd->lex->ident.length + 3, MYF(MY_WME));
+    if (!name_fmt || !name_buf)
+    {
+      my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), 1);  /* needed 1 bytes */
+      goto end;
+    }
+    thd->lex->comment.length= 0;
+
+    for (uint i= 0; i < thd->lex->fragmented_binlog_event; i++)
+    {
+      user_var_entry *entry;
+
+      sprintf(name_fmt, "%s_%%d", thd->lex->ident.str);
+      sprintf(name_buf, name_fmt, i);
+      entry=
+        (user_var_entry*) my_hash_search(&thd->user_vars,
+                                         (uchar*) name_buf,
+                                         strlen(name_buf));
+      DBUG_ASSERT(entry); // TODO: turn into an error
+      DBUG_ASSERT(entry->type == STRING_RESULT);
+      memcpy(thd->lex->comment.str + thd->lex->comment.length,
+             entry->value, entry->length); // todo: EOS ?
+      thd->lex->comment.length += entry->length;
+      // TODO: in mysqlbinlog output we should reset the user variables to reclaim memory
+    }
+    my_free(name_fmt);
+    my_free(name_buf);
+  }
+
+  if (!(coded_len= thd->lex->comment.length))
+  {
+    my_error(ER_SYNTAX_ERROR, MYF(0));
+    DBUG_VOID_RETURN;
+  }
+
+  decoded_len= base64_needed_decoded_length(coded_len);
+  if (!(buf= (char *) my_malloc(decoded_len, MYF(MY_WME))))
+  {
+    my_error(ER_OUTOFMEMORY, MYF(ME_FATALERROR), 1);  /* needed 1 bytes */
+    goto end;
+  }
 
   for (char const *strptr= thd->lex->comment.str ;
        strptr < thd->lex->comment.str + thd->lex->comment.length ; )

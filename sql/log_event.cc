@@ -2785,15 +2785,13 @@ void Log_event::print_base64(IO_CACHE* file,
 
   if (print_event_info->base64_output_mode != BASE64_OUTPUT_DECODE_ROWS)
   {
+#if 0
+  /* Moved into copy_event_cache_to_file_and_reinit */
     if (my_b_tell(file) == 0)
       my_b_write_string(file, "\nBINLOG '\n");
-
+#endif
     my_b_printf(file, "%s\n", tmp_str);
-
-    if (!more)
-      my_b_printf(file, "'%s\n", print_event_info->delimiter);
   }
-  
   if (print_event_info->verbose)
   {
     Rows_log_event *ev= NULL;
@@ -10479,6 +10477,7 @@ void Rows_log_event::pack_info(Protocol *protocol)
 #endif
 
 #ifdef MYSQL_CLIENT
+
 void Rows_log_event::print_helper(FILE *file,
                                   PRINT_EVENT_INFO *print_event_info,
                                   char const *const name)
@@ -10498,7 +10497,23 @@ void Rows_log_event::print_helper(FILE *file,
   if (get_flags(STMT_END_F))
   {
     copy_event_cache_to_file_and_reinit(head, file);
-    copy_event_cache_to_file_and_reinit(body, file);
+    if (print_event_info->base64_output_mode != BASE64_OUTPUT_DECODE_ROWS)
+    {
+      my_off_t body_size= my_b_tell(body);
+      uint n_frags= body_size > opt_binlog_rows_event_max_encoded_size ?
+        BINLOG_ROWS_EVENT_ENCODED_FRAGMENTS : 1;
+      const char* before_frag= n_frags == 1 ?
+        "\nBINLOG '\n" : "\nSET @binlog_fragment_%d='";
+      const char* after_frag= "'%s\n";
+      
+      copy_cache_frag_to_file_and_reinit(body, file, n_frags,
+                                         before_frag, after_frag,
+                                         print_event_info->delimiter);
+    }
+    else
+    {
+      copy_event_cache_to_file_and_reinit(body, file);
+    }
   }
 }
 #endif
